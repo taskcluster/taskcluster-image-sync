@@ -100,10 +100,9 @@ jobs:
               fi
             done
 
-            echo "$all_tags" \
-              | grep -E "${TAG_PATTERN}" \
-              | sort -rV \
-              | head -n "${MAX_RECENT_TAGS}"
+            local sorted
+            sorted=$(echo "$all_tags" | grep -E "${TAG_PATTERN}" | sort -rV)
+            echo "$sorted" | head -n "${MAX_RECENT_TAGS}"
           }
 
           # Fetch existing tags from GAR for a given image.
