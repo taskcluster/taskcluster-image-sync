@@ -101,12 +101,12 @@ jobs:
             done
 
             # Sort by semver: temporarily strip 'v' prefix, sort, then restore original tag names
-            echo "$all_tags" \
+            local sorted
+            sorted=$(echo "$all_tags" \
               | grep -E "${TAG_PATTERN}" \
               | awk '{orig=$0; sub(/^v/,""); print $0 "\t" orig}' \
-              | sort -rV \
-              | head -n "${MAX_RECENT_TAGS}" \
-              | cut -f2
+              | sort -rV)
+            echo "$sorted" | head -n "${MAX_RECENT_TAGS}" | cut -f2
           }
 
           # Fetch existing tags from GAR for a given image.
