@@ -19,7 +19,7 @@ env:
     taskcluster/taskcluster
     taskcluster/websocktunnel
   # Tag pattern to sync (only release tags)
-  TAG_PATTERN: '^v[0-9]+\.[0-9]+\.[0-9]+(-devel)?$'
+  TAG_PATTERN: '^v?[0-9]+\.[0-9]+\.[0-9]+(-devel)?$'
   # Max recent tags to check per image on scheduled runs
   MAX_RECENT_TAGS: 10
 
@@ -100,9 +100,13 @@ jobs:
               fi
             done
 
-            local sorted
-            sorted=$(echo "$all_tags" | grep -E "${TAG_PATTERN}" | sort -rV)
-            echo "$sorted" | head -n "${MAX_RECENT_TAGS}"
+            # Sort by semver: temporarily strip 'v' prefix, sort, then restore original tag names
+            echo "$all_tags" \
+              | grep -E "${TAG_PATTERN}" \
+              | awk '{orig=$0; sub(/^v/,""); print $0 "\t" orig}' \
+              | sort -rV \
+              | head -n "${MAX_RECENT_TAGS}" \
+              | cut -f2
           }
 
           # Fetch existing tags from GAR for a given image.
@@ -122,8 +126,8 @@ jobs:
 
             if [ -n "${INPUT_VERSION}" ]; then
               # Manual run with specific version: force-sync this tag
-              if ! echo "${INPUT_VERSION}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-                echo "ERROR: Invalid version format '${INPUT_VERSION}'. Expected format: v<major>.<minor>.<patch> (e.g. v85.0.0)"
+              if ! echo "${INPUT_VERSION}" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "ERROR: Invalid version format '${INPUT_VERSION}'. Expected format: v<major>.<minor>.<patch> or <major>.<minor>.<patch> (e.g. v85.0.0 or 98.0.1)"
                 exit 1
               fi
               tags_to_sync="${INPUT_VERSION}"
