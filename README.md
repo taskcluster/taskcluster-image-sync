@@ -10,7 +10,7 @@ See [taskcluster/taskcluster#7925](https://github.com/taskcluster/taskcluster/is
 
 A GitHub Actions workflow runs every 30 minutes and:
 
-1. Queries Docker Hub for recent release tags (`v*`) of each source image
+1. Queries Docker Hub for recent release tags of each source image (supports both `v`-prefixed and unprefixed tags)
 2. Queries GAR for existing tags (stateless diff — GAR is the source of truth)
 3. Pulls any missing tags from Docker Hub, retags them for GAR, and pushes them
 
@@ -27,7 +27,7 @@ To sync a specific version immediately (e.g., for an urgent deployment):
 
 1. Go to **Actions** > **Sync Taskcluster Images to GAR**
 2. Click **Run workflow**
-3. Enter the version tag (e.g., `v85.0.0`) or leave blank to run the normal diff sync
+3. Enter the version tag (e.g., `v98.0.1` or `98.0.1`) or leave blank to run the normal diff sync
 4. Click **Run workflow**
 
 Manual runs with a version input will force-sync that tag even if it already exists in GAR.
@@ -59,6 +59,6 @@ These values can be adjusted in the workflow file:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SOURCE_IMAGES` | `taskcluster/taskcluster taskcluster/websocktunnel` | Images to sync |
-| `TAG_PATTERN` | `^v[0-9]` | Regex for tags to sync |
+| `TAG_PATTERN` | `^v?[0-9]+\.[0-9]+\.[0-9]+(-devel)?$` | Regex for tags to sync |
 | `MAX_RECENT_TAGS` | `10` | Max recent tags to check per scheduled run |
 | Schedule | Every 30 minutes | Cron schedule for polling |
