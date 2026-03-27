@@ -19,7 +19,7 @@ env:
     taskcluster/taskcluster
     taskcluster/websocktunnel
   # Tag pattern to sync (only release tags)
-  TAG_PATTERN: '^v[0-9]'
+  TAG_PATTERN: '^v[0-9]+\.[0-9]+\.[0-9]+(-devel)?$'
   # Max recent tags to check per image on scheduled runs
   MAX_RECENT_TAGS: 10
 
@@ -81,9 +81,9 @@ jobs:
             local page=1
             local all_tags=""
 
-            # Paginate through Docker Hub API results
+            # Paginate through all Docker Hub API results
             while true; do
-              response=$(curl -sf "https://hub.docker.com/v2/repositories/${image}/tags?page_size=100&page=${page}&ordering=-name" 2>/dev/null) || break
+              response=$(curl -sf "https://hub.docker.com/v2/repositories/${image}/tags?page_size=100&page=${page}" 2>/dev/null) || break
               tags=$(echo "$response" | jq -r '.results[].name // empty')
               if [ -z "$tags" ]; then
                 break
@@ -95,7 +95,7 @@ jobs:
               fi
               page=$((page + 1))
               # Safety limit to avoid runaway pagination
-              if [ "$page" -gt 10 ]; then
+              if [ "$page" -gt 100 ]; then
                 break
               fi
             done
