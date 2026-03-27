@@ -1,0 +1,199 @@
+name: Sync Taskcluster Images to GAR
+
+on:
+  schedule:
+    # Every 30 minutes
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >
+          Specific version tag to sync (e.g. v85.0.0).
+          If omitted, syncs all recent missing tags.
+        required: false
+        type: string
+
+env:
+  # Source images on Docker Hub
+  SOURCE_IMAGES: >-
+    taskcluster/taskcluster
+    taskcluster/websocktunnel
+  # Tag pattern to sync (only release tags)
+  TAG_PATTERN: '^v[0-9]'
+  # Max recent tags to check per image on scheduled runs
+  MAX_RECENT_TAGS: 10
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for Workload Identity Federation
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - registry: us-docker.pkg.dev/moz-fx-taskcluster-prod/taskcluster-prod
+            workload_identity_provider_secret: GCP_WORKLOAD_IDENTITY_PROVIDER_PROD
+            service_account_secret: GCP_SERVICE_ACCOUNT_EMAIL_PROD
+          # Uncomment to add non-prod GAR target:
+          # - registry: us-docker.pkg.dev/moz-fx-taskcluster-nonprod/taskcluster-nonprod
+          #   workload_identity_provider_secret: GCP_WORKLOAD_IDENTITY_PROVIDER_NONPROD
+          #   service_account_secret: GCP_SERVICE_ACCOUNT_EMAIL_NONPROD
+
+    steps:
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets[matrix.workload_identity_provider_secret] }}
+          service_account: ${{ secrets[matrix.service_account_secret] }}
+
+      - name: Configure Docker for GAR
+        run: gcloud auth configure-docker us-docker.pkg.dev --quiet
+
+      - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Sync images
+        env:
+          GAR_REGISTRY: ${{ matrix.registry }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          FAILED=0
+          SYNCED_TAGS=""
+
+          # Fetch tags from Docker Hub for a given image.
+          # Returns tags matching TAG_PATTERN, sorted by semver (newest first),
+          # limited to MAX_RECENT_TAGS.
+          fetch_dockerhub_tags() {
+            local image="$1"
+            local page=1
+            local all_tags=""
+
+            # Paginate through Docker Hub API results
+            while true; do
+              response=$(curl -sf "https://hub.docker.com/v2/repositories/${image}/tags?page_size=100&page=${page}&ordering=-last_updated" 2>/dev/null) || break
+              tags=$(echo "$response" | jq -r '.results[].name // empty')
+              if [ -z "$tags" ]; then
+                break
+              fi
+              all_tags="${all_tags}${tags}"$'\n'
+              next=$(echo "$response" | jq -r '.next // empty')
+              if [ -z "$next" ]; then
+                break
+              fi
+              page=$((page + 1))
+              # Safety limit to avoid runaway pagination
+              if [ "$page" -gt 10 ]; then
+                break
+              fi
+            done
+
+            echo "$all_tags" \
+              | grep -E "${TAG_PATTERN}" \
+              | sort -rV \
+              | head -n "${MAX_RECENT_TAGS}"
+          }
+
+          # Fetch existing tags from GAR for a given image.
+          fetch_gar_tags() {
+            local image="$1"
+            gcloud artifacts docker tags list "${GAR_REGISTRY}/${image}" \
+              --format='value(tag)' 2>/dev/null || true
+          }
+
+          for source_image in $SOURCE_IMAGES; do
+            # Extract short name (e.g. "taskcluster" from "taskcluster/taskcluster")
+            image_name="${source_image#*/}"
+
+            echo "============================================"
+            echo "Processing: ${source_image} -> ${GAR_REGISTRY}/${image_name}"
+            echo "============================================"
+
+            if [ -n "${INPUT_VERSION}" ]; then
+              # Manual run with specific version: force-sync this tag
+              if ! echo "${INPUT_VERSION}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "ERROR: Invalid version format '${INPUT_VERSION}'. Expected format: v<major>.<minor>.<patch> (e.g. v85.0.0)"
+                exit 1
+              fi
+              tags_to_sync="${INPUT_VERSION}"
+              echo "Manual sync requested for version: ${INPUT_VERSION}"
+            else
+              # Scheduled run: compute diff
+              echo "Fetching Docker Hub tags for ${source_image}..."
+              dockerhub_tags=$(fetch_dockerhub_tags "${source_image}")
+              echo "Found $(echo "$dockerhub_tags" | grep -c . || true) recent tags on Docker Hub"
+
+              echo "Fetching GAR tags for ${image_name}..."
+              gar_tags=$(fetch_gar_tags "${image_name}")
+              echo "Found $(echo "$gar_tags" | grep -c . || true) tags in GAR"
+
+              # Compute diff: tags in Docker Hub but not in GAR
+              tags_to_sync=""
+              for tag in $dockerhub_tags; do
+                if ! echo "$gar_tags" | grep -qx "$tag"; then
+                  tags_to_sync="${tags_to_sync}${tag}"$'\n'
+                fi
+              done
+              tags_to_sync=$(echo "$tags_to_sync" | sed '/^$/d')
+
+              if [ -z "$tags_to_sync" ]; then
+                echo "Nothing to sync for ${source_image}"
+                continue
+              fi
+              echo "Tags to sync: $(echo "$tags_to_sync" | tr '\n' ' ')"
+            fi
+
+            for tag in $tags_to_sync; do
+              echo "---"
+              echo "Syncing ${source_image}:${tag} -> ${GAR_REGISTRY}/${image_name}:${tag}"
+
+              if ! docker pull "${source_image}:${tag}"; then
+                echo "ERROR: Failed to pull ${source_image}:${tag}"
+                FAILED=1
+                continue
+              fi
+
+              docker tag "${source_image}:${tag}" "${GAR_REGISTRY}/${image_name}:${tag}"
+
+              if ! docker push "${GAR_REGISTRY}/${image_name}:${tag}"; then
+                echo "ERROR: Failed to push ${GAR_REGISTRY}/${image_name}:${tag}"
+                FAILED=1
+                continue
+              fi
+
+              echo "Successfully synced ${image_name}:${tag}"
+              SYNCED_TAGS="${SYNCED_TAGS}  ${image_name}:${tag}"$'\n'
+
+              # Clean up local images to save disk space
+              docker rmi "${source_image}:${tag}" "${GAR_REGISTRY}/${image_name}:${tag}" 2>/dev/null || true
+            done
+          done
+
+          echo ""
+          echo "============================================"
+          echo "Sync Summary"
+          echo "============================================"
+          if [ -n "$SYNCED_TAGS" ]; then
+            echo "Successfully synced:"
+            echo "$SYNCED_TAGS"
+          else
+            echo "Nothing to sync — all tags are up to date."
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo ""
+            echo "WARNING: Some tags failed to sync. Check logs above."
+            exit 1
+          fi
