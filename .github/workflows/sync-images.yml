@@ -2,8 +2,8 @@ name: Sync Taskcluster Images to GAR
 
 on:
   schedule:
-    # Every 30 minutes
-    - cron: '*/30 * * * *'
+    # Every 30 minutes, weekdays only
+    - cron: '*/30 * * * 1-5'
   workflow_dispatch:
     inputs:
       version:
